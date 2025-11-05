@@ -19,5 +19,4 @@ public:
 
       static void init();
       static void loop();
-      static float get_hr();
 };

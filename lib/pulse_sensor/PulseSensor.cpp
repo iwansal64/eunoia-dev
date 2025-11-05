@@ -9,10 +9,11 @@ uint8_t PulseSensor::beat_analog_sample_index = 0;
 
 void PulseSensor::init()
 {
-  pinMode(PULSE_SENSOR_PIN, INPUT);
+      Serial.println("[Pulse] Initializing Pulse Sensor");
+      pinMode(PULSE_SENSOR_PIN, INPUT);
 
-  analogReadResolution(12);
-  analogSetPinAttenuation(PULSE_SENSOR_PIN, ADC_11db);
+      analogReadResolution(12);
+      analogSetPinAttenuation(PULSE_SENSOR_PIN, ADC_11db);
 }
 
 void PulseSensor::loop()
@@ -95,8 +96,4 @@ void PulseSensor::loop()
       // For debugging
       // Serial.print("Signal: ");
       // Serial.println(signal);
-}
-
-float PulseSensor::get_hr()
-{
 }
