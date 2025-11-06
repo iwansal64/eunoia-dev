@@ -9,6 +9,5 @@ void VibrationMotor::init()
 
 void VibrationMotor::vibrate(uint8_t strength)
 {
-      Serial.printf("[Vibrator] Vibrating at this %s Strength\n", String((strength / 255.0f) * 100.0f, (unsigned int)2U));
       analogWrite(VIBRATION_PIN, strength);
 }

@@ -54,7 +54,7 @@ void BluetoothManager::init()
       Serial.println("[Bluetooth] Initializing Bluetooth Server");
 
       // Initialize Basic Functions
-      NimBLEDevice::init(BLUETOOTH_ADVERTISING_NAME);
+      NimBLEDevice::init(BLUETOOTH_ADVERTISING_NAME); 
       NimBLEDevice::setMTU(BLUETOOTH_MTU_VALUE);
 
       // Initialize Server
@@ -82,4 +82,6 @@ void BluetoothManager::update_bpm(uint8_t hr)
 {
       // Set the value of BLE characteristic for heart rate
       ble_bpm_characteristics->setValue(String(hr).c_str());
+      ble_bpm_characteristics->notify();
+      Serial.println("[Bluetooth] Updating BPM value");
 }
