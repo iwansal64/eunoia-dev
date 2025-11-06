@@ -1,3 +1,5 @@
+#define DEBUG
+
 #include <Arduino.h>
 #include <PulseSensor.h>
 
@@ -6,96 +8,163 @@ unsigned long PulseSensor::last_beat_time = 0;
 int PulseSensor::BPM = 0;
 bool PulseSensor::beat_detected = false;
 uint8_t PulseSensor::beat_analog_sample_index = 0;
-uint16_t PulseSensor::beat_analog_samples[PULSE_ANALOG_SCOUNT];
+uint16_t PulseSensor::beat_analog_samples[PULSE_WINDOW_INTEGRATOR];
 
+// Running variables
+double PulseSensor::baseline = 0.0; // for DC removal (exponential)
+double PulseSensor::lastFiltered = 0.0;
+
+// integrator buffer (moving window)
+double PulseSensor::integratorBuf[PULSE_WINDOW_INTEGRATOR];
+int PulseSensor::integratorIdx = 0;
+double PulseSensor::integratorSum = 0.0;
+
+// adaptive thresholding / peak detection
+double PulseSensor::noiseLevel = 0.0;
+double PulseSensor::signalPeak = 0.0;
+
+uint64_t PulseSensor::lastBeatTime = 0;
+uint64_t PulseSensor::lastSampleMicros = 0;
+
+int PulseSensor::bpmHistory[PULSE_BPM_HISTORY];
+int PulseSensor::bpmIdx = 0;
+int PulseSensor::bpmCount = 0;
+
+void PulseSensor::setupADC() {
+      analogReadResolution(12);
+      analogSetPinAttenuation(PULSE_SENSOR_PIN, ADC_11db);
+}
+
+void PulseSensor::pushIntegrator(double v)
+{
+      PulseSensor::integratorSum -= PulseSensor::integratorBuf[PulseSensor::integratorIdx];
+      PulseSensor::integratorBuf[PulseSensor::integratorIdx] = v;
+      PulseSensor::integratorSum += PulseSensor::integratorBuf[PulseSensor::integratorIdx];
+      PulseSensor::integratorIdx = (PulseSensor::integratorIdx + 1) % PULSE_WINDOW_INTEGRATOR;
+}
+
+double PulseSensor::getIntegrator()
+{
+      return PulseSensor::integratorSum / PULSE_WINDOW_INTEGRATOR;
+}
+
+double PulseSensor::readADCfloat()
+{
+      int raw = analogRead(PULSE_SENSOR_PIN);
+      return (double)raw; // 0..4095
+}
+
+void PulseSensor::recordBeat(uint64_t now)
+{
+      if (PulseSensor::lastBeatTime == 0)
+      {
+            PulseSensor::lastBeatTime = now;
+            return;
+      }
+      uint64_t dt = now - PulseSensor::lastBeatTime;
+      PulseSensor::lastBeatTime = now;
+      if (dt < PULSE_MIN_BEAT_MS || dt > PULSE_MAX_BEAT_MS)
+            return; // ignore
+      int instBPM = (int)round(60000.0 / dt);
+      PulseSensor::bpmHistory[PulseSensor::bpmIdx] = instBPM;
+      PulseSensor::bpmIdx = (PulseSensor::bpmIdx + 1) % PULSE_BPM_HISTORY;
+      if (PulseSensor::bpmCount < PULSE_BPM_HISTORY)
+            PulseSensor::bpmCount++;
+}
+
+int PulseSensor::getAvgBPM()
+{
+      if (PulseSensor::bpmCount == 0)
+            return 0;
+      long s = 0;
+      for (int i = 0; i < PulseSensor::bpmCount; ++i)
+            s += PulseSensor::bpmHistory[i];
+      return (int)(s / PulseSensor::bpmCount);
+}
 
 void PulseSensor::init()
 {
       Serial.println("[Pulse] Initializing Pulse Sensor");
       pinMode(PULSE_SENSOR_PIN, INPUT);
 
-      analogReadResolution(12);
-      analogSetPinAttenuation(PULSE_SENSOR_PIN, ADC_11db);
+      PulseSensor::setupADC();
+
+      for (int i = 0; i < PULSE_WINDOW_INTEGRATOR; ++i) PulseSensor::integratorBuf[i] = 0.0;
+      PulseSensor::lastSampleMicros = micros();
 }
 
 void PulseSensor::loop()
 {
-      // Get the current time
-      unsigned long current_time = millis();
-
-      // Update the analog read of pulse sensor intervally
-      if (current_time - PulseSensor::last_beat_analog_read > PULSE_ANALOG_READ_INTERVAL)
+      unsigned long nowMicros = micros();
+      // maintain sampling interval
+      if (nowMicros - PulseSensor::lastSampleMicros < PULSE_SAMPLE_INTERVAL_US)
       {
-            // Get the current analog read of heart rate sensor
-            uint16_t current_beat_analog = analogRead(PULSE_SENSOR_PIN);
-            Serial.printf("%d,%d\n", current_beat_analog, BPM);
+            // yield to not hog CPU
+            yield();
+            return;
+      }
+      PulseSensor::lastSampleMicros += PULSE_SAMPLE_INTERVAL_US; // keep steady sampling
 
-            // Detect outliers and convert all of it flat to 0
-            if (current_beat_analog < PULSE_ANALOG_OUTLIER_MIN || current_beat_analog > PULSE_ANALOG_OUTLIER_MAX)
+      // 1) read raw
+      double raw = PulseSensor::readADCfloat();
+
+      // 2) DC removal (slow exponential moving average baseline)
+      PulseSensor::baseline = PULSE_BASELINE_ALPHA * PulseSensor::baseline + (1.0 - PULSE_BASELINE_ALPHA) * raw;
+      double ac = raw - PulseSensor::baseline; // centered AC component (can be negative)
+
+      // 3) derivative (simple)
+      static double prevAC = 0.0;
+      double deriv = ac - prevAC;
+      prevAC = ac;
+
+      // 4) square to accentuate peaks
+      double squared = deriv * deriv;
+
+      // 5) moving-window integrator
+      pushIntegrator(squared);
+      double integrator = PulseSensor::getIntegrator();
+
+      // 6) adaptively track peak & noise
+      // decay peak & noise slowly
+      PulseSensor::signalPeak *= PULSE_PEAK_DECAY;
+      PulseSensor::noiseLevel *= PULSE_NOISE_DECAY;
+      // update with current integrator
+      if (integrator > PulseSensor::signalPeak)
+            PulseSensor::signalPeak = integrator;
+      else
+            PulseSensor::noiseLevel = max(PulseSensor::noiseLevel, integrator * 0.5f);
+
+      // 7) adaptive threshold: midway between peak and noise (tweak multiplier)
+      double threshold = PulseSensor::noiseLevel + ((double) PULSE_TRESHOLD_FACTOR) * (PulseSensor::signalPeak - PulseSensor::noiseLevel);
+
+      // 8) detect rising edge crossing threshold with refractory
+      static bool lastOver = false;
+      bool over = integrator > threshold;
+      uint64_t now = millis();
+      uint64_t lastDetectedMs = 0;
+
+      if (over && !lastOver)
+      {
+            // rising edge
+            if (millis() - lastDetectedMs > PULSE_MIN_BEAT_MS)
             {
-                  current_beat_analog = 0;
+                  // good beat
+                  PulseSensor::recordBeat(now);
+                  lastDetectedMs = millis();
             }
-
-            // Update the heart beat analog samples
-            PulseSensor::beat_analog_samples[PulseSensor::beat_analog_sample_index] = current_beat_analog;
-            PulseSensor::beat_analog_sample_index++;
-
-            // If the analog sample index more than the size of the pulse analog samples array
-            if (PulseSensor::beat_analog_sample_index > PULSE_ANALOG_SCOUNT)
-            {
-                  PulseSensor::beat_analog_sample_index = 0; // Reset the index back to zero
-            }
-
-            // Update the last analog reading for the pulse sensor
-            PulseSensor::last_beat_analog_read = current_time;
       }
+      lastOver = over;
 
-      // Gather all of the signal samples and get the average of it
-      uint16_t signal = 0;
-      uint8_t valid_samples_count = 0;
-      for (uint8_t i = 0; i < PULSE_ANALOG_SCOUNT; i++)
-      {
-            signal += PulseSensor::beat_analog_samples[i];
-            valid_samples_count += PulseSensor::beat_analog_samples[i] != 0 ? 1 : 0; // If it's an outlier, adjust the valid signal counts
-      }
+      // 9) Update the BPM value
+      PulseSensor::BPM = PulseSensor::getAvgBPM();
 
-      if (valid_samples_count > 0)
-      {                                    // Prevent zero division error!
-            signal /= valid_samples_count; // Divide the signal by the total of valid samples
-      }
 
-      // If the signal is above treshold and the beat is not detected just yet
-      if (signal > PULSE_ANALOG_THRESHOLD && !PulseSensor::beat_detected)
-      {
-            // Detect beat
-            PulseSensor::beat_detected = true;
-            unsigned long beatInterval = current_time - PulseSensor::last_beat_time;
-
-            // If the interval of last beat and current beat is more than 300 (avoid noise) and less than 2000 (avoid inaccurate reading at first detected heartbeat)
-            if (beatInterval > 300 && beatInterval < 2000)
-            {
-                  // BPM is beat per minute right?
-                  // So, we should divide 60000 miliseconds (which is a minute)
-                  // with the interval of the time of last beat and current time (current beat) which the interval between beats
-                  // For example if the interval is just 1000 miliseconds (1 second) the BPM should be 60 BPM because if our heart beats every second in a minute there should be 60 beats. makes sense right? :>
-                  PulseSensor::BPM = 60000 / beatInterval;
-
-                  // Serial.print("❤️ Heartbeat detected! BPM = ");
-                  // Serial.println(PulseSensor::BPM);
-            }
-
-            // Update the last time beat to current time :D
-            PulseSensor::last_beat_time = current_time;
-      }
-
-      if (signal < PULSE_ANALOG_THRESHOLD - 50)
-      {
-            PulseSensor::beat_detected = false; // Reset detection
-      }
-
-      digitalWrite(LED_BUILTIN, PulseSensor::beat_detected);
-
-      // For debugging
-      // Serial.print("Signal: ");
-      // Serial.println(signal);
+      // 10) [Optional] Print values to serial plotter
+#ifdef DEBUG
+      Serial.printf("Beat:%d\n", over ? 1 : 0);
+      Serial.printf("Raw:%d\n", (int)integrator);
+      Serial.printf("Threshold:%d\n", threshold);
+      Serial.printf("BPM:%d\n", PulseSensor::BPM);
+#endif
+      yield();
 }

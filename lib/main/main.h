@@ -48,6 +48,7 @@ void check_for_microsleep()
 
   // Detects anomalities in BPM value
   if (PulseSensor::BPM < 10) {
+    yield();
     return;
   }
 
@@ -80,4 +81,6 @@ void update_hr_data()
       last_update_bpm = current_time; // Update last update HR time
     }
   }
+  
+  yield();
 }
