@@ -13,6 +13,9 @@ class ServerCallbacks : public NimBLEServerCallbacks
       void onConnect(NimBLEServer *ble_server, NimBLEConnInfo &ble_conn_info) override
       {
             Serial.printf("[Bluetooth] Connected client with address: %s\n", ble_conn_info.getAddress().toString().c_str());
+            if(ble_bpm_characteristics != nullptr) {
+                  ble_bpm_characteristics->notify();
+            }
       }
 
       void onDisconnect(NimBLEServer *ble_server, NimBLEConnInfo &ble_conn_info, int reason) override
@@ -81,6 +84,11 @@ void BluetoothManager::init()
 void BluetoothManager::update_bpm(uint8_t hr)
 {
       // Set the value of BLE characteristic for heart rate
+      if(ble_bpm_characteristics == nullptr) {
+            Serial.println("[BLuetooth] BLE BPM Characteristic is not defined yet.");
+            return;
+      }
+
       ble_bpm_characteristics->setValue(String(hr).c_str());
       ble_bpm_characteristics->notify();
       Serial.println("[Bluetooth] Updating BPM value");
