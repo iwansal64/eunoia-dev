@@ -3,13 +3,13 @@
 #include <Arduino.h>
 
 // Basic Information
-#define PULSE_SENSOR_PIN 34            // ADC pin connected to pulse sensor signal
+#define PULSE_SENSOR_PIN 3            // ADC pin connected to pulse sensor signal
 
 // Timing Information
 #define PULSE_SAMPLE_RATE_HZ 200       // Target sample frequency
 
 // Sensitivity Settings
-#define PULSE_TRESHOLD_FACTOR 0.02    // Increase if its too sensitive
+#define PULSE_TRESHOLD_FACTOR 0.01    // Increase if its too sensitive
 #define PULSE_WINDOW_INTEGRATOR 30 // Integration window in samples (~150 ms at 200Hz)
 
 // Smooth Settings

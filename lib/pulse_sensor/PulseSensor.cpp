@@ -1,5 +1,3 @@
-#define DEBUG
-
 #include <Arduino.h>
 #include <PulseSensor.h>
 
